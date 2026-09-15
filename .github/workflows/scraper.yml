@@ -1,0 +1,38 @@
+name: Telegram Configs Scraper
+
+on:
+  schedule:
+    # اجرای اتوماتیک هر ۲ ساعت یک‌بار (ساعت 00:00, 02:00, 04:00 و...)
+    - cron: '0 */2 * * *'
+  workflow_dispatch: # امکان اجرای دستی اسکریپت از تب Actions
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # دسترسی لازم برای ذخیره فایل خروجی در ریپازیتوری
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Execute Python Scraper
+        run: python scraper.py
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add *.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update configs [$(date -u +'%Y-%m-%d %H:%M UTC')]" && git push)

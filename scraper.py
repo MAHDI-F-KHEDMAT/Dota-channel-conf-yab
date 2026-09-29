@@ -6,18 +6,57 @@ import base64
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 # ==========================================
 # ⚙️ تنظیمات اسکریپت
 # ==========================================
 DAYS_BACK = 2
 ONLY_TLS_REALITY = True
+CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"  # پیشوند اسم کانفیگ‌ها (مثلا ConfigsHUB_VIP_1)
 
 # لیست کانال‌ها
 CHANNELS = [
     "https://t.me/ConfigsHUB"
 ]
+
+# ==========================================
+# تابع تغییر نام کانفیگ
+# ==========================================
+def rename_config(config_url, new_name):
+    url_lower = config_url.lower()
+
+    # --- تغییر نام برای vmess (نیاز به دیکد و انکد base64 دارد) ---
+    if url_lower.startswith("vmess://"):
+        try:
+            b64_str = re.sub(r'(?i)^vmess://', '', config_url).split('#')[0].strip()
+            b64_str += '=' * (-len(b64_str) % 4)
+            b64_str = b64_str.replace('-', '+').replace('_', '/')
+            
+            decoded = base64.b64decode(b64_str).decode('utf-8', errors='ignore')
+            data = json.loads(decoded)
+            
+            # تغییر نام در دیکشنری json
+            data['ps'] = new_name
+            
+            # انکد مجدد به base64
+            new_json = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+            new_b64 = base64.b64encode(new_json).decode('utf-8')
+            return f"vmess://{new_b64}"
+            
+        except Exception:
+            return config_url # در صورت خطا، همان کانفیگ اصلی برگردانده می‌شود
+
+    # --- تغییر نام برای vless, trojan, ss, hysteria و ... ---
+    else:
+        try:
+            # حذف نام قبلی در صورت وجود (حذف هر چیزی بعد از #)
+            base_url = config_url.split('#')[0]
+            # انکد کردن نام جدید برای استفاده در URL
+            encoded_name = quote(new_name)
+            return f"{base_url}#{encoded_name}"
+        except Exception:
+            return config_url
 
 # ==========================================
 # تابع تشخیص TLS / Reality
@@ -275,10 +314,13 @@ def scrape_all_channels():
         filename = f'Combined_TLS_Reality_{DAYS_BACK}days.txt' if ONLY_TLS_REALITY else f'Combined_Configs_{DAYS_BACK}days.txt'
 
         with open(filename, 'w', encoding='utf-8') as f:
-            for config in unique_configs:
-                f.write(config + '\n\n')
+            # ذخیره و اعمال تغییر نام روی تک تک کانفیگ‌ها
+            for idx, config in enumerate(unique_configs, 1):
+                new_name = f"{CONFIG_PREFIX_NAME}{idx}"  # مثلاً ConfigsHUB_VIP_1
+                renamed_config = rename_config(config, new_name)
+                f.write(renamed_config + '\n\n')
 
-        print(f"\n✅ فایل نهایی ذخیره شد: {filename}")
+        print(f"\n✅ فایل نهایی با نام‌های جدید ذخیره شد: {filename}")
         print("=" * 65)
 
     else:

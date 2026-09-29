@@ -3,6 +3,8 @@ import time
 import html
 import base64
 import requests
+import uuid
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
@@ -10,7 +12,7 @@ from datetime import datetime, timedelta
 # ⚙️ تنظیمات اسکریپت
 # ==========================================
 DAYS_BACK = 2
-CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"  # پیشوند اسم کانفیگ‌ها
+CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"
 
 # لیست کانال‌ها
 CHANNELS = [
@@ -18,65 +20,83 @@ CHANNELS = [
 ]
 
 # ==========================================
-# تابع پاکسازی و اصلاح لینک از کاراکترهای اضافه تلگرام
+# تابع اعتبارسنجی عمیق برای جلوگیری از Fatal Panic در Xray-Core
 # ==========================================
-def clean_vless_url(config_url):
-    # حذف کاراکترهای ناخواسته پایان لینک (مثل پرانتز، نقطه، کاما و...)
-    config_url = re.sub(r'[\)\}\]\>\.\,\;\:\'\" ]+$', '', config_url.strip())
-    # حذف کاراکترهای ناخواسته ابتدای لینک
-    config_url = re.sub(r'^[\(\{\[\<\'\" ]+', '', config_url)
-    return config_url
-
-# ==========================================
-# تابع اعتبارسنجی ساختاری (جهت جلوگیری از کرش v2rayNG)
-# ==========================================
-def is_valid_vless_structure(config_url):
-    """
-    بررسی دقیق ساختار استاندارد vless://UUID@HOST:PORT
-    """
-    # الگوی ساختار استاندارد VLESS
-    vless_regex = r'^vless://[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[a-zA-Z0-9\.\-\_\[\]]+:\d+'
-    
-    if not re.match(vless_regex, config_url, re.IGNORECASE):
-        return False
-
-    # بررسی معتبر بودن پورت (بین ۱ تا ۶۵۵۳۵)
+def is_strictly_valid_vless(config_url):
     try:
-        port_match = re.search(r'@(?:\[[a-fA-F0-9:]+\]|[^:]+):(\d+)', config_url)
-        if port_match:
-            port = int(port_match.group(1))
-            if not (1 <= port <= 65535):
-                return False
-    except Exception:
-        return False
+        config_url = config_url.strip()
+        if not config_url.lower().startswith("vless://"):
+            return False
 
-    return True
+        # جدا کردن لینک از اسم (Remark)
+        raw_url = config_url.split('#')[0].strip()
+        
+        if '@' not in raw_url or ':' not in raw_url:
+            return False
 
-# ==========================================
-# تابع بررسی اینکه کانفیگ VLESS دارای TLS/Reality است
-# ==========================================
-def is_vless_tls_or_reality(config_url):
-    url_lower = config_url.lower()
+        parsed = urlparse(raw_url)
 
-    if not url_lower.startswith("vless://"):
-        return False
+        # ۱. بررسی صحت کامل و استاندارد UUID (بررسی ساختار ۳۶ کاراکتری)
+        user_id = parsed.username
+        if not user_id:
+            return False
+        try:
+            uuid.UUID(user_id)
+        except ValueError:
+            return False
 
-    if '?' not in config_url:
-        return False
+        # ۲. بررسی آدرس و پورت
+        hostname = parsed.hostname
+        port = parsed.port
+        if not hostname or not port or not (1 <= port <= 65535):
+            return False
 
-    try:
-        query = config_url.split('?', 1)[1].split('#')[0]
-        params = dict(param.split('=', 1) for param in query.split('&') if '=' in param)
+        # جلوگیری از وجود فاصله یا کاراکترهای کنترلی در آدرس
+        if any(c in hostname for c in [' ', '\t', '\n', '\r']):
+            return False
+
+        # ۳. تجزیه و تحلیل پارامترهای کوئری
+        query_params = parse_qs(parsed.query)
+        params = {k.lower(): v[0] for k.lower(), v in query_params.items() if v}
 
         security = params.get('security', '').lower()
+        net_type = params.get('type', 'tcp').lower()
+        flow = params.get('flow', '').lower()
 
-        if security in ('tls', 'reality', 'xtls'):
-            return True
+        # بررسی شرط TLS / Reality
+        if security not in ('tls', 'reality', 'xtls'):
+            return False
+
+        # بررسی شرط Reality: عدم وجود pbk یا sni باعث کرش هسته می‌شود
+        if security == 'reality':
+            pbk = params.get('pbk', '')
+            sni = params.get('sni', '')
+            if not pbk or len(pbk) < 30 or not sni:
+                return False
+
+        # بررسی شرط Vision: ست بودن flow=xtls-rprx-vision روی غیر TCP باعث کرش می‌شود
+        if 'vision' in flow:
+            if net_type != 'tcp' or security not in ('tls', 'reality', 'xtls'):
+                return False
+
+        # ۴. بررسی معتبر بودن Fingerprint
+        fp = params.get('fp', '').lower()
+        valid_fps = {'chrome', 'firefox', 'safari', 'edge', '360', 'qq', 'ios', 'android', 'random', 'randomized', ''}
+        if fp and fp not in valid_fps:
+            return False
+
+        return True
 
     except Exception:
-        pass
+        return False
 
-    return False
+# ==========================================
+# تابع تمیزکاری کاراکترهای زائد تلگرام
+# ==========================================
+def clean_and_format_url(config_url):
+    config_url = re.sub(r'[\)\}\]\>\.\,\;\:\'\" ]+$', '', config_url.strip())
+    config_url = re.sub(r'^[\(\{\[\<\'\" ]+', '', config_url)
+    return config_url
 
 # ==========================================
 # تابع تغییر نام کانفیگ
@@ -108,7 +128,7 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
 
     while not reached_old:
         page_count += 1
-        print(f"\n🌐 [صفحه {page_count}] دریافت اطلاعات از: {current_url}")
+        print(f"🌐 [صفحه {page_count}] دریافت اطلاعات از: {current_url}")
 
         try:
             response = session.get(current_url, timeout=25)
@@ -119,7 +139,6 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                 continue
 
             if response.status_code != 200:
-                print(f"  ⚠️ وضعیت غیرعادی ({response.status_code}) - توقف کانال.")
                 break
 
             response.raise_for_status()
@@ -172,21 +191,16 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                     br.replace_with(" \n ")
 
                 msg_text = text_div.get_text(separator=" ", strip=False)
-                # پاکسازی کاراکترهای مخرب و مخفی UTF-8
                 msg_text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', msg_text)
                 msg_text = html.unescape(msg_text)
 
                 found_configs = config_pattern.findall(msg_text)
 
                 for config in found_configs:
-                    # ۱. تمیز کردن علائم انتهای لینک
-                    clean_config = clean_vless_url(config)
-                    
-                    # ۲. بررسی صحت ساختاری لینک (جلوگیری از کرش)
-                    if is_valid_vless_structure(clean_config):
-                        # ۳. بررسی TLS / Reality بودن
-                        if is_vless_tls_or_reality(clean_config):
-                            channel_configs.append(clean_config)
+                    cleaned = clean_and_format_url(config)
+                    # فیلتر سخت‌گیرانه برای حفظ سلامت هسته Xray
+                    if is_strictly_valid_vless(cleaned):
+                        channel_configs.append(cleaned)
 
         if reached_old or not page_min_id or page_min_id in seen_min_ids:
             break
@@ -208,8 +222,6 @@ def scrape_all_channels():
     })
 
     cutoff_datetime = datetime.utcnow() - timedelta(days=DAYS_BACK)
-    
-    # الگوی دریافت اولیه لینک
     config_pattern = re.compile(r'(?i)vless://[^\s\'"<>]+')
 
     all_extracted_configs = []
@@ -221,7 +233,7 @@ def scrape_all_channels():
         except Exception as e:
             print(f"❌ خطا: {e}")
 
-    # حذف موارد تکراری
+    # حذف کانفیگ‌های تکراری (بدون محدودیت تعداد)
     unique_configs = list(dict.fromkeys(all_extracted_configs))
 
     if unique_configs:
@@ -230,10 +242,7 @@ def scrape_all_channels():
             new_name = f"{CONFIG_PREFIX_NAME}{idx}"
             renamed_list.append(rename_config(config, new_name))
 
-        # ساخت متن یکپارچه
         plain_text_content = "\n".join(renamed_list)
-
-        # انکد به Base64
         b64_encoded_content = base64.b64encode(plain_text_content.encode('utf-8')).decode('utf-8')
 
         sub_filename = 'sub_vless_base64.txt'
@@ -241,8 +250,8 @@ def scrape_all_channels():
             f.write(b64_encoded_content)
 
         print("\n" + "=" * 65)
-        print(f"✅ تعداد {len(renamed_list)} کانفیگ سالم و معتبر استخراج شد.")
-        print(f"✅ فایل سابسکریپشن بدون مشکل ساختار ساخته شد: {sub_filename}")
+        print(f"✅ تعداد {len(renamed_list)} کانفیگ معتبر استخراج گردید.")
+        print(f"✅ فایل سابسکریپشن ساخته شد: {sub_filename}")
         print("=" * 65)
 
     else:

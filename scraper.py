@@ -1,16 +1,16 @@
 import re
 import time
 import html
+import base64
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, quote
 
 # ==========================================
 # ⚙️ تنظیمات اسکریپت
 # ==========================================
 DAYS_BACK = 2
-CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"  # پیشوند اسم کانفیگ‌ها (مثلا ConfigsHUB_VIP_1)
+CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"  # پیشوند اسم کانفیگ‌ها
 
 # لیست کانال‌ها
 CHANNELS = [
@@ -22,13 +22,12 @@ CHANNELS = [
 # ==========================================
 def rename_config(config_url, new_name):
     try:
-        # حذف نام قبلی در صورت وجود (حذف هر چیزی بعد از #)
-        base_url = config_url.split('#')[0]
-        # انکد کردن نام جدید برای استفاده در URL (جلوگیری از خرابی لینک در صورت داشتن فاصله)
-        encoded_name = quote(new_name)
-        return f"{base_url}#{encoded_name}"
+        # حذف نام قبلی و لایه‌روبی لینک
+        base_url = config_url.split('#')[0].strip()
+        # قرار دادن اسم جدید بدون کاراکترهای مخرب
+        return f"{base_url}#{new_name}"
     except Exception:
-        return config_url
+        return config_url.strip()
 
 # ==========================================
 # تابع بررسی اینکه کانفیگ VLESS دارای TLS/Reality است
@@ -44,12 +43,10 @@ def is_vless_tls_or_reality(config_url):
 
     try:
         query = config_url.split('?', 1)[1].split('#')[0]
-        params = parse_qs(query)
+        params = dict(param.split('=', 1) for param in query.split('&') if '=' in param)
         
-        # گرفتن پارامتر security
-        security = params.get('security', [''])[0].lower()
+        security = params.get('security', '').lower()
 
-        # بررسی اینکه آیا امنیت یکی از موارد زیر است
         if security in ('tls', 'reality', 'xtls'):
             return True
 
@@ -58,9 +55,8 @@ def is_vless_tls_or_reality(config_url):
 
     return False
 
-
 # ==========================================
-# تابع بررسی هر کانال با لاگ لحظه‌ای
+# تابع بررسی هر کانال
 # ==========================================
 def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
 
@@ -71,9 +67,6 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
     reached_old = False
     page_count = 0
     channel_configs = []
-    total_raw = 0
-    accepted_count = 0
-    rejected_count = 0
     seen_min_ids = set()
 
     print(f"\n" + "─" * 60)
@@ -88,12 +81,12 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
             response = session.get(current_url, timeout=25)
 
             if response.status_code == 429:
-                print("  ⚠️ محدودیت درخواست (Rate Limit)! ۱۵ ثانیه صبر...")
+                print("  ⚠️ محدودیت درخواست! ۱۵ ثانیه صبر...")
                 time.sleep(15)
                 continue
 
             if response.status_code != 200:
-                print(f"  ⚠️ وضعیت غیرعادی ({response.status_code}) - توقف این کانال.")
+                print(f"  ⚠️ وضعیت غیرعادی ({response.status_code}) - توقف کانال.")
                 break
 
             response.raise_for_status()
@@ -106,12 +99,9 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
         messages = soup.find_all('div', class_='tgme_widget_message')
 
         if not messages:
-            print("  ℹ️ پیامی در این صفحه یافت نشد.")
             break
 
-        print(f"  🔍 پیدا شدن {len(messages)} پیام. در حال بررسی...")
         page_min_id = None
-        configs_in_this_page = 0
 
         for msg in messages:
             data_post = msg.get('data-post', '')
@@ -135,9 +125,7 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
             except ValueError:
                 continue
 
-            # بررسی محدوده زمانی تعیین‌شده
             if msg_dt < cutoff_datetime:
-                print(f"  ⏰ رسیدن به پیام قدیمی‌تر از بازه مجاز ({msg_dt.strftime('%Y-%m-%d %H:%M')}). توقف این کانال.")
                 reached_old = True
                 break
 
@@ -154,47 +142,21 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                 msg_text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', msg_text)
                 msg_text = html.unescape(msg_text)
 
-                # جستجوی کانفیگ‌های vless
                 found_configs = config_pattern.findall(msg_text)
 
                 for config in found_configs:
                     config = config.strip()
-                    total_raw += 1
-                    configs_in_this_page += 1
-
-                    preview = config[:55] + "..." if len(config) > 55 else config
-
-                    # فیلتر فقط VLESS های TLS یا Reality
                     if is_vless_tls_or_reality(config):
                         channel_configs.append(config)
-                        accepted_count += 1
-                        print(f"    ✅ [تایید TLS/Reality] {preview}")
-                    else:
-                        rejected_count += 1
-                        print(f"    ❌ [رد شد - غیرمجاز]   {preview}")
 
-        print(f"  📊 آمار صفحه {page_count}: {configs_in_this_page} کانفیگ Vless شناسایی شد.")
-
-        if reached_old or not page_min_id:
-            break
-
-        if page_min_id in seen_min_ids:
-            print("  ℹ️ شناسه تکراری دریافت شد (انتهای صفحات کانال).")
+        if reached_old or not page_min_id or page_min_id in seen_min_ids:
             break
 
         seen_min_ids.add(page_min_id)
         current_url = f"{channel_url}?before={page_min_id}"
         time.sleep(1.5)
 
-    print(
-        f"\n✔️ پایان کانال | "
-        f"کل Vless یافت شده: {total_raw} | "
-        f"تایید شده (TLS/Reality): {accepted_count} | "
-        f"رد شده: {rejected_count}"
-    )
-
     return channel_configs
-
 
 # ==========================================
 # تابع اصلی مدیریت
@@ -203,64 +165,47 @@ def scrape_all_channels():
 
     session = requests.Session()
     session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        )
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"
     })
 
     cutoff_datetime = datetime.utcnow() - timedelta(days=DAYS_BACK)
-
-    # الگوی جستجو تغییر کرد: فقط vless استخراج می‌شود
     config_pattern = re.compile(r'(?i)vless://[^\s\'"<>]+')
 
     all_extracted_configs = []
 
-    print("=" * 65)
-    print(
-        f"🚀 شروع استخراج Vless های (TLS/Reality) از {len(CHANNELS)} کانال\n"
-        f"📅 محدوده زمانی: {DAYS_BACK} روز گذشته (از {cutoff_datetime.strftime('%Y-%m-%d %H:%M')} به بعد)"
-    )
-    print("=" * 65)
-
-    for index, channel in enumerate(CHANNELS, 1):
-        print(f"\n[کانال {index} از {len(CHANNELS)}]")
+    for channel in CHANNELS:
         try:
-            configs = scrape_channel(
-                channel,
-                cutoff_datetime,
-                session,
-                config_pattern
-            )
+            configs = scrape_channel(channel, cutoff_datetime, session, config_pattern)
             all_extracted_configs.extend(configs)
-
         except Exception as e:
-            print(f"❌ خطای غیرپیش‌بینی‌شده در کانال {channel}: {e}")
-            continue
+            print(f"❌ خطا: {e}")
 
     unique_configs = list(dict.fromkeys(all_extracted_configs))
 
-    print("\n" + "=" * 65)
-    print("📊 آمار کلی نهایی:")
-    print(f"  تعداد کل پردازش شده: {len(all_extracted_configs)}")
-    print(f"  تعداد کانفیگ‌های یکتا (غیرتکراری): {len(unique_configs)}")
-
     if unique_configs:
-        filename = f'Vless_TLS_Reality_{DAYS_BACK}days.txt'
+        renamed_list = []
+        for idx, config in enumerate(unique_configs, 1):
+            new_name = f"{CONFIG_PREFIX_NAME}{idx}"
+            renamed_list.append(rename_config(config, new_name))
 
-        with open(filename, 'w', encoding='utf-8') as f:
-            for idx, config in enumerate(unique_configs, 1):
-                new_name = f"{CONFIG_PREFIX_NAME}{idx}"
-                renamed_config = rename_config(config, new_name)
-                f.write(renamed_config + '\n\n')
+        # ۱. ساخت متن یکپارچه بدون خطوط خالی اضافه
+        plain_text_content = "\n".join(renamed_list)
 
-        print(f"\n✅ فایل نهایی ذخیره شد: {filename}")
+        # ۲. انکد کردن کل متن به فرمت استاندارد Base64
+        b64_encoded_content = base64.b64encode(plain_text_content.encode('utf-8')).decode('utf-8')
+
+        # ذخیره فایل مخصوص سابسکریپشن (این فایل را در گیتهاب آپلود کنید)
+        sub_filename = f'sub_vless_base64.txt'
+        with open(sub_filename, 'w', encoding='utf-8') as f:
+            f.write(b64_encoded_content)
+
+        print("\n" + "=" * 65)
+        print(f"✅ فایل سابسکریپشن استاندارد ساخته شد: {sub_filename}")
+        print("💡 محتوای این فایل را روی GitHub آپلود کنید تا برنامه‌ها کرش نکنند.")
         print("=" * 65)
 
     else:
-        print("\n❌ هیچ کانفیگ Vless مطابق با شرایط یافت نشد.")
-        print("=" * 65)
+        print("\n❌ هیچ کانفیگی یافت نشد.")
 
 
 if __name__ == "__main__":

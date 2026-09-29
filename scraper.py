@@ -1,8 +1,6 @@
 import re
 import time
-import json
 import html
-import base64
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
@@ -12,7 +10,6 @@ from urllib.parse import parse_qs, quote
 # ⚙️ تنظیمات اسکریپت
 # ==========================================
 DAYS_BACK = 2
-ONLY_TLS_REALITY = True
 CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"  # پیشوند اسم کانفیگ‌ها (مثلا ConfigsHUB_VIP_1)
 
 # لیست کانال‌ها
@@ -21,95 +18,43 @@ CHANNELS = [
 ]
 
 # ==========================================
-# تابع تغییر نام کانفیگ
+# تابع تغییر نام کانفیگ (مخصوص VLESS)
 # ==========================================
 def rename_config(config_url, new_name):
-    url_lower = config_url.lower()
-
-    # --- تغییر نام برای vmess (نیاز به دیکد و انکد base64 دارد) ---
-    if url_lower.startswith("vmess://"):
-        try:
-            b64_str = re.sub(r'(?i)^vmess://', '', config_url).split('#')[0].strip()
-            b64_str += '=' * (-len(b64_str) % 4)
-            b64_str = b64_str.replace('-', '+').replace('_', '/')
-            
-            decoded = base64.b64decode(b64_str).decode('utf-8', errors='ignore')
-            data = json.loads(decoded)
-            
-            # تغییر نام در دیکشنری json
-            data['ps'] = new_name
-            
-            # انکد مجدد به base64
-            new_json = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-            new_b64 = base64.b64encode(new_json).decode('utf-8')
-            return f"vmess://{new_b64}"
-            
-        except Exception:
-            return config_url # در صورت خطا، همان کانفیگ اصلی برگردانده می‌شود
-
-    # --- تغییر نام برای vless, trojan, ss, hysteria و ... ---
-    else:
-        try:
-            # حذف نام قبلی در صورت وجود (حذف هر چیزی بعد از #)
-            base_url = config_url.split('#')[0]
-            # انکد کردن نام جدید برای استفاده در URL
-            encoded_name = quote(new_name)
-            return f"{base_url}#{encoded_name}"
-        except Exception:
-            return config_url
+    try:
+        # حذف نام قبلی در صورت وجود (حذف هر چیزی بعد از #)
+        base_url = config_url.split('#')[0]
+        # انکد کردن نام جدید برای استفاده در URL (جلوگیری از خرابی لینک در صورت داشتن فاصله)
+        encoded_name = quote(new_name)
+        return f"{base_url}#{encoded_name}"
+    except Exception:
+        return config_url
 
 # ==========================================
-# تابع تشخیص TLS / Reality
+# تابع بررسی اینکه کانفیگ VLESS دارای TLS/Reality است
 # ==========================================
-def is_tls_or_reality(config_url):
+def is_vless_tls_or_reality(config_url):
     url_lower = config_url.lower()
 
-    if url_lower.startswith(("hysteria2://", "hy2://", "tuic://", "hysteria://")):
-        return True
-
-    # --- vless & trojan ---
-    if url_lower.startswith(("vless://", "trojan://")):
-        if '?' not in config_url:
-            return False
-        try:
-            query = config_url.split('?', 1)[1].split('#')[0]
-            params = parse_qs(query)
-            security = params.get('security', [''])[0].lower()
-            flow = params.get('flow', [''])[0].lower()
-
-            if security in ('tls', 'reality', 'xtls') or 'xtls' in flow:
-                return True
-
-            if 'pbk' in params or 'sni' in params or 'sid' in params:
-                return True
-
-        except Exception:
-            pass
-
+    if not url_lower.startswith("vless://"):
         return False
 
-    # --- vmess ---
-    if url_lower.startswith("vmess://"):
-        try:
-            b64 = re.sub(r'(?i)^vmess://', '', config_url).split('#')[0].strip()
-            b64 += '=' * (-len(b64) % 4)
-            b64 = b64.replace('-', '+').replace('_', '/')
+    if '?' not in config_url:
+        return False
 
-            decoded = base64.b64decode(b64).decode('utf-8', errors='ignore')
-            data = json.loads(decoded)
-            tls_val = str(data.get('tls', '')).lower()
+    try:
+        query = config_url.split('?', 1)[1].split('#')[0]
+        params = parse_qs(query)
+        
+        # گرفتن پارامتر security
+        security = params.get('security', [''])[0].lower()
 
-            if tls_val in ('tls', 'reality', 'true', '1'):
-                return True
+        # بررسی اینکه آیا امنیت یکی از موارد زیر است
+        if security in ('tls', 'reality', 'xtls'):
+            return True
 
-        except Exception:
-            pass
-
-        return 'tls' in url_lower or 'reality' in url_lower
-
-    # --- shadowsocks ---
-    if url_lower.startswith(("ss://", "ssr://")):
-        return 'plugin=' in url_lower and ('tls' in url_lower or 'obfs' in url_lower)
+    except Exception:
+        pass
 
     return False
 
@@ -209,6 +154,7 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                 msg_text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', msg_text)
                 msg_text = html.unescape(msg_text)
 
+                # جستجوی کانفیگ‌های vless
                 found_configs = config_pattern.findall(msg_text)
 
                 for config in found_configs:
@@ -216,28 +162,22 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                     total_raw += 1
                     configs_in_this_page += 1
 
-                    # پیش‌نمایش کوتاه از کانفیگ جهت چاپ در لاگ
                     preview = config[:55] + "..." if len(config) > 55 else config
 
-                    if ONLY_TLS_REALITY:
-                        if is_tls_or_reality(config):
-                            channel_configs.append(config)
-                            accepted_count += 1
-                            print(f"    ✅ [تایید TLS/Reality] {preview}")
-                        else:
-                            rejected_count += 1
-                            print(f"    ❌ [رد شد - غیر TLS]   {preview}")
-                    else:
+                    # فیلتر فقط VLESS های TLS یا Reality
+                    if is_vless_tls_or_reality(config):
                         channel_configs.append(config)
                         accepted_count += 1
-                        print(f"    🔹 [استخراج شد]       {preview}")
+                        print(f"    ✅ [تایید TLS/Reality] {preview}")
+                    else:
+                        rejected_count += 1
+                        print(f"    ❌ [رد شد - غیرمجاز]   {preview}")
 
-        print(f"  📊 آمار صفحه {page_count}: {configs_in_this_page} کانفیگ شناسایی شد.")
+        print(f"  📊 آمار صفحه {page_count}: {configs_in_this_page} کانفیگ Vless شناسایی شد.")
 
         if reached_old or not page_min_id:
             break
 
-        # جلوگیری از حلقه بی‌پایان
         if page_min_id in seen_min_ids:
             print("  ℹ️ شناسه تکراری دریافت شد (انتهای صفحات کانال).")
             break
@@ -248,8 +188,8 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
 
     print(
         f"\n✔️ پایان کانال | "
-        f"کل کانفیگ‌های شناسایی‌شده: {total_raw} | "
-        f"تایید شده: {accepted_count} | "
+        f"کل Vless یافت شده: {total_raw} | "
+        f"تایید شده (TLS/Reality): {accepted_count} | "
         f"رد شده: {rejected_count}"
     )
 
@@ -272,19 +212,15 @@ def scrape_all_channels():
 
     cutoff_datetime = datetime.utcnow() - timedelta(days=DAYS_BACK)
 
-    config_pattern = re.compile(
-        r'(?i)(?:vless|vmess|trojan|ss|ssr|tuic|'
-        r'hysteria2|hy2|hysteria|wireguard|juicity)'
-        r'://[^\s\'"<>]+'
-    )
+    # الگوی جستجو تغییر کرد: فقط vless استخراج می‌شود
+    config_pattern = re.compile(r'(?i)vless://[^\s\'"<>]+')
 
     all_extracted_configs = []
 
     print("=" * 65)
     print(
-        f"🚀 شروع استخراج کانفیگ‌ها از {len(CHANNELS)} کانال\n"
-        f"📅 محدوده زمانی: {DAYS_BACK} روز گذشته (از {cutoff_datetime.strftime('%Y-%m-%d %H:%M')} به بعد)\n"
-        f"🔒 فیلتر TLS/Reality: {'فعال' if ONLY_TLS_REALITY else 'غیرفعال'}"
+        f"🚀 شروع استخراج Vless های (TLS/Reality) از {len(CHANNELS)} کانال\n"
+        f"📅 محدوده زمانی: {DAYS_BACK} روز گذشته (از {cutoff_datetime.strftime('%Y-%m-%d %H:%M')} به بعد)"
     )
     print("=" * 65)
 
@@ -311,20 +247,19 @@ def scrape_all_channels():
     print(f"  تعداد کانفیگ‌های یکتا (غیرتکراری): {len(unique_configs)}")
 
     if unique_configs:
-        filename = f'Combined_TLS_Reality_{DAYS_BACK}days.txt' if ONLY_TLS_REALITY else f'Combined_Configs_{DAYS_BACK}days.txt'
+        filename = f'Vless_TLS_Reality_{DAYS_BACK}days.txt'
 
         with open(filename, 'w', encoding='utf-8') as f:
-            # ذخیره و اعمال تغییر نام روی تک تک کانفیگ‌ها
             for idx, config in enumerate(unique_configs, 1):
-                new_name = f"{CONFIG_PREFIX_NAME}{idx}"  # مثلاً ConfigsHUB_VIP_1
+                new_name = f"{CONFIG_PREFIX_NAME}{idx}"
                 renamed_config = rename_config(config, new_name)
                 f.write(renamed_config + '\n\n')
 
-        print(f"\n✅ فایل نهایی با نام‌های جدید ذخیره شد: {filename}")
+        print(f"\n✅ فایل نهایی ذخیره شد: {filename}")
         print("=" * 65)
 
     else:
-        print("\n❌ هیچ کانفیگی مطابق با شرایط یافت نشد.")
+        print("\n❌ هیچ کانفیگ Vless مطابق با شرایط یافت نشد.")
         print("=" * 65)
 
 

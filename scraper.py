@@ -19,7 +19,9 @@ DAYS_BACK = 2
 CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"
 MAX_FINAL_CONFIGS = 200  # محدودیت فایل نهایی (۲۰۰ کانفیگ برتر)
 
-CHANNELS = ["https://t.me/ConfigsHUB"]
+CHANNELS = [
+    "https://t.me/ConfigsHUB"
+]
 
 class Colors:
     GREEN = '\033[92m'
@@ -28,14 +30,9 @@ class Colors:
     RESET = '\033[0m'
 
 # ==========================================
-# توابع مربوط به تست سرعت و دانلود ۱ مگابایت
+# تابع تست سرعت و دانلود ۱ مگابایت
 # ==========================================
 def test_download_speed(config_url, local_socks_port=1080):
-    """
-    تابع تست سرعت کانفیگ. 
-    در اجرای واقعی، هسته Xray باید این کانفیگ VLESS را روی پورت SOCKS5 ران کرده باشد.
-    """
-    # اتصال به پورتی که Xray کانفیگ را روی آن باز کرده است
     proxy_address = f"socks5h://127.0.0.1:{local_socks_port}"
     proxies = {
         "http": proxy_address,
@@ -44,33 +41,22 @@ def test_download_speed(config_url, local_socks_port=1080):
     
     start_time = time.time()
     try:
-        # دانلود فایل ۱ مگابایتی از سرور تست سرعت با تایم‌اوت ۱۰ ثانیه
-        # اگر کانفیگ خراب باشد در همین مرحله خطا می‌دهد
         response = requests.get("http://speedtest.tele2.net/1MB.zip", proxies=proxies, timeout=10)
-        
-        # بررسی اینکه واقعاً فایل با موفقیت دانلود شده است
         if response.status_code == 200 and len(response.content) > 1000000:
             duration = time.time() - start_time
-            speed_mbps = (1.0 / duration) * 8 # تبدیل به مگابیت بر ثانیه
+            speed_mbps = (1.0 / duration) * 8
             return {'config': config_url, 'speed': speed_mbps, 'status': 'ok'}
-            
     except Exception:
-        pass # اتصال ناموفق بود
+        pass
         
     return {'config': config_url, 'speed': 0, 'status': 'failed'}
 
 def filter_top_200_configs(unique_configs):
-    """
-    تست موازی تمام کانفیگ‌ها و گلچین کردن ۲۰۰ تای برتر
-    """
     print(f"\n{Colors.YELLOW}🚀 شروع تست سرعت دانلود (۱ مگابایتی) برای {len(unique_configs)} کانفیگ...{Colors.RESET}")
-    print(f"⚠️ {Colors.RED}نکته:{Colors.RESET} اجرای تست VLESS در پایتون نیازمند راه‌اندازی Xray-Core برای هر Thread است.")
     
     valid_tested = []
     
-    # اجرای ۲۰ تست به صورت همزمان (Multi-Threading)
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        # در اینجا فرض می‌کنیم Xray-core در پس‌زمینه هندل شده است
         future_to_config = {executor.submit(test_download_speed, url): url for url in unique_configs}
         
         for future in concurrent.futures.as_completed(future_to_config):
@@ -78,22 +64,18 @@ def filter_top_200_configs(unique_configs):
             if result['status'] == 'ok':
                 valid_tested.append(result)
 
-    # اگر تستی موفق نبود، برای جلوگیری از خالی ماندن فایل، همان کانفیگ‌های اولیه رو برمی‌گردانیم
     if not valid_tested:
-        print(f"{Colors.YELLOW}⚠️ هیچ کانفیگی در تست سرعت پایتون موفق نبود. (احتمالاً Xray-Core روی سرور ست نشده است).{Colors.RESET}")
+        print(f"{Colors.YELLOW}⚠️ هیچ کانفیگی در تست سرعت موفق نبود. بازگشت به حالت پیش‌فرض.{Colors.RESET}")
         return unique_configs[:MAX_FINAL_CONFIGS]
 
-    # ۱. مرتب‌سازی لیست بر اساس بالاترین سرعت
     valid_tested.sort(key=lambda x: x['speed'], reverse=True)
-    
-    # ۲. برش دادن و انتخاب ۲۰۰ تای اول
     top_200 = valid_tested[:MAX_FINAL_CONFIGS]
     
     print(f"{Colors.GREEN}✅ تست سرعت تمام شد. {len(top_200)} کانفیگ پرسرعت جدا شدند.{Colors.RESET}")
     return [item['config'] for item in top_200]
 
 # ==========================================
-# تابع فیلتر ضد کرش (از پاسخ قبلی)
+# تابع فیلتر ضد کرش
 # ==========================================
 def is_bulletproof_vless(raw_url):
     try:
@@ -116,13 +98,19 @@ def is_bulletproof_vless(raw_url):
 # تابع بررسی هر کانال
 # ==========================================
 def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
-    # (کد قبلی دقیقاً مانند قبل - برای استخراج لینک‌ها)
     if "/s/" not in channel_url: channel_url = channel_url.replace("t.me/", "t.me/s/")
     current_url, reached_old, channel_configs, seen_min_ids = channel_url, False, [], set()
+
+    print(f"\n" + "─" * 60)
+    print(f"📂 شروع بررسی کانال: {channel_url}")
+    print("─" * 60)
 
     while not reached_old:
         try:
             response = session.get(current_url, timeout=25)
+            if response.status_code == 429:
+                time.sleep(15)
+                continue
             if response.status_code != 200: break
         except Exception: break
 
@@ -134,13 +122,18 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
         for msg in messages:
             data_post = msg.get('data-post', '')
             if '/' in data_post:
-                msg_id = int(data_post.split('/')[-1])
-                if page_min_id is None or msg_id < page_min_id: page_min_id = msg_id
+                try:
+                    msg_id = int(data_post.split('/')[-1])
+                    if page_min_id is None or msg_id < page_min_id: page_min_id = msg_id
+                except ValueError: pass
 
             time_tag = msg.find('time')
             if not time_tag: continue
             
-            msg_dt = datetime.fromisoformat(time_tag.get('datetime').replace('Z', '+00:00').split('+')[0])
+            try:
+                msg_dt = datetime.fromisoformat(time_tag.get('datetime').replace('Z', '+00:00').split('+')[0])
+            except ValueError: continue
+
             if msg_dt < cutoff_datetime:
                 reached_old = True
                 break
@@ -155,6 +148,7 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
         if reached_old or not page_min_id or page_min_id in seen_min_ids: break
         seen_min_ids.add(page_min_id)
         current_url = f"{channel_url}?before={page_min_id}"
+        time.sleep(1.5)
     return channel_configs
 
 # ==========================================
@@ -168,17 +162,19 @@ def scrape_all_channels():
     
     all_extracted_configs = []
     for channel in CHANNELS:
-        all_extracted_configs.extend(scrape_channel(channel, cutoff_datetime, session, config_pattern))
+        try:
+            all_extracted_configs.extend(scrape_channel(channel, cutoff_datetime, session, config_pattern))
+        except Exception as e:
+            print(f"{Colors.RED}❌ خطا: {e}{Colors.RESET}")
 
     unique_configs = list(dict.fromkeys(all_extracted_configs))
 
     if unique_configs:
-        # مرحله اضافه شده: تست سرعت و انتخاب 200 تای برتر
         best_200_configs = filter_top_200_configs(unique_configs)
 
         renamed_list = []
         for idx, config in enumerate(best_200_configs, 1):
-            new_name = f"{CONFIG_PREFIX_NAME}TOP_{idx}"
+            new_name = f"{CONFIG_PREFIX_NAME}{idx}"
             renamed_list.append(f"{config}#{new_name}")
 
         plain_text_content = "\n".join(renamed_list)

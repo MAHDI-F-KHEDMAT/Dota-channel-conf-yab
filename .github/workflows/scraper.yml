@@ -1,38 +1,34 @@
-name: Telegram Configs Scraper
+name: VLESS Scraper and Tester
 
 on:
   schedule:
-    # اجرای اتوماتیک هر ۲ ساعت یک‌بار (ساعت 00:00, 02:00, 04:00 و...)
-    - cron: '0 */2 * * *'
-  workflow_dispatch: # امکان اجرای دستی اسکریپت از تب Actions
+    - cron: '0 */12 * * *' # هر ۱۲ ساعت
+  workflow_dispatch:
 
 jobs:
-  run-scraper:
+  run-scraper-and-test:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write # دسترسی لازم برای ذخیره فایل خروجی در ریپازیتوری
-
     steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Install Python Requirements
+        run: pip install requests beautifulsoup4
 
-      - name: Execute Python Scraper
-        run: python scraper.py
+      - name: Run Python Scraper
+        run: python main.py
 
-      - name: Commit and Push changes
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update configs [$(date -u +'%Y-%m-%d %H:%M UTC')]" && git push)
+      # (اختیاری) اگر بخواهید تست سرعت با دقت ۱۰۰٪ توسط هسته Xray در لینوکس انجام شود، 
+      # اینجا می‌توانید ابزار LiteSpeedTest (محبوب‌ترین تستر VLESS در گیتهاب) را دانلود و اجرا کنید
+      # و نتایج را به جای پایتون، با آن فیلتر کنید.
+
+      - name: Commit and Push Results
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "Update Top 200 Fast VLESS Configs"
+          file_pattern: "sub_vless_base64.txt"

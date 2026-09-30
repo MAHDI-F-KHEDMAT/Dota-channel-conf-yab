@@ -3,10 +3,13 @@ import time
 import html
 import base64
 import requests
-import uuid
+import urllib.parse
 from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
+
+# فهماندن پروتکل vless به کتابخانه استاندارد پایتون (بسیار مهم برای جلوگیری از خطای پارس)
+urllib.parse.uses_netloc.append('vless')
 
 # ==========================================
 # ⚙️ تنظیمات اسکریپت
@@ -20,93 +23,56 @@ CHANNELS = [
 ]
 
 # ==========================================
-# تابع اعتبارسنجی عمیق برای جلوگیری از Fatal Panic در Xray-Core
+# تابع فیلتر ضد کرش (Bulletproof Validator)
 # ==========================================
-def is_strictly_valid_vless(config_url):
+def is_bulletproof_vless(raw_url):
+    """
+    این تابع تمام پارامترهایی که باعث کرش کردن Xray-Core در v2rayNG می‌شوند را بررسی می‌کند.
+    """
     try:
-        config_url = config_url.strip()
-        if not config_url.lower().startswith("vless://"):
-            return False
-
-        # جدا کردن لینک از اسم (Remark)
-        raw_url = config_url.split('#')[0].strip()
-        
-        if '@' not in raw_url or ':' not in raw_url:
-            return False
-
         parsed = urlparse(raw_url)
-
-        # ۱. بررسی صحت کامل و استاندارد UUID (بررسی ساختار ۳۶ کاراکتری)
-        user_id = parsed.username
-        if not user_id:
+        
+        # ۱. بررسی آدرس و پورت
+        if not parsed.hostname or not parsed.port:
             return False
-        try:
-            uuid.UUID(user_id)
-        except ValueError:
+        if not (1 <= parsed.port <= 65535):
             return False
-
-        # ۲. بررسی آدرس و پورت
-        hostname = parsed.hostname
-        port = parsed.port
-        if not hostname or not port or not (1 <= port <= 65535):
-            return False
-
-        # جلوگیری از وجود فاصله یا کاراکترهای کنترلی در آدرس
-        if any(c in hostname for c in [' ', '\t', '\n', '\r']):
-            return False
-
-        # ۳. تجزیه و تحلیل پارامترهای کوئری
-        query_params = parse_qs(parsed.query)
-        params = {k.lower(): v[0] for k.lower(), v in query_params.items() if v}
-
-        security = params.get('security', '').lower()
+            
+        # ۲. بررسی پارامترهای کوئری
+        qs = parse_qs(parsed.query)
+        params = {k.lower(): v[0] for k, v in qs.items()}
+        
         net_type = params.get('type', 'tcp').lower()
+        security = params.get('security', 'none').lower()
         flow = params.get('flow', '').lower()
-
-        # بررسی شرط TLS / Reality
-        if security not in ('tls', 'reality', 'xtls'):
+        
+        if security not in ('none', 'tls', 'xtls', 'reality'):
             return False
-
-        # بررسی شرط Reality: عدم وجود pbk یا sni باعث کرش هسته می‌شود
+            
+        # ⚠️ ۳. جلوگیری از کرش Reality (مهم‌ترین بخش)
         if security == 'reality':
             pbk = params.get('pbk', '')
+            # کلید pbk در Reality باید دقیقاً ۴۳ کاراکتر Base64Url باشد
+            if not pbk or not re.match(r'^[A-Za-z0-9\-_]{43}$', pbk):
+                return False
+                
+            sid = params.get('sid', '')
+            # شناسه sid باید حتماً کد Hex (0-9, a-f) و زوج باشد (2, 4, 6, 8 کاراکتر)
+            if sid and not re.match(r'^([0-9a-fA-F]{2}){1,8}$', sid):
+                return False
+                
             sni = params.get('sni', '')
-            if not pbk or len(pbk) < 30 or not sni:
+            if not sni:
                 return False
-
-        # بررسی شرط Vision: ست بودن flow=xtls-rprx-vision روی غیر TCP باعث کرش می‌شود
+                
+        # ⚠️ ۴. جلوگیری از کرش Vision
         if 'vision' in flow:
-            if net_type != 'tcp' or security not in ('tls', 'reality', 'xtls'):
+            if net_type != 'tcp' or security not in ('tls', 'xtls', 'reality'):
                 return False
-
-        # ۴. بررسی معتبر بودن Fingerprint
-        fp = params.get('fp', '').lower()
-        valid_fps = {'chrome', 'firefox', 'safari', 'edge', '360', 'qq', 'ios', 'android', 'random', 'randomized', ''}
-        if fp and fp not in valid_fps:
-            return False
-
+                
         return True
-
     except Exception:
         return False
-
-# ==========================================
-# تابع تمیزکاری کاراکترهای زائد تلگرام
-# ==========================================
-def clean_and_format_url(config_url):
-    config_url = re.sub(r'[\)\}\]\>\.\,\;\:\'\" ]+$', '', config_url.strip())
-    config_url = re.sub(r'^[\(\{\[\<\'\" ]+', '', config_url)
-    return config_url
-
-# ==========================================
-# تابع تغییر نام کانفیگ
-# ==========================================
-def rename_config(config_url, new_name):
-    try:
-        base_url = config_url.split('#')[0].strip()
-        return f"{base_url}#{new_name}"
-    except Exception:
-        return config_url.strip()
 
 # ==========================================
 # تابع بررسی هر کانال
@@ -191,16 +157,15 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                     br.replace_with(" \n ")
 
                 msg_text = text_div.get_text(separator=" ", strip=False)
-                msg_text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', msg_text)
                 msg_text = html.unescape(msg_text)
 
+                # استخراج لینک با رجکس هوشمند
                 found_configs = config_pattern.findall(msg_text)
 
-                for config in found_configs:
-                    cleaned = clean_and_format_url(config)
-                    # فیلتر سخت‌گیرانه برای حفظ سلامت هسته Xray
-                    if is_strictly_valid_vless(cleaned):
-                        channel_configs.append(cleaned)
+                for raw_config in found_configs:
+                    # بررسی تخصصی ضد کرش
+                    if is_bulletproof_vless(raw_config):
+                        channel_configs.append(raw_config)
 
         if reached_old or not page_min_id or page_min_id in seen_min_ids:
             break
@@ -222,7 +187,10 @@ def scrape_all_channels():
     })
 
     cutoff_datetime = datetime.utcnow() - timedelta(days=DAYS_BACK)
-    config_pattern = re.compile(r'(?i)vless://[^\s\'"<>]+')
+    
+    # ⚠️ رجکس جدید: این رجکس اصلاً نام (Remark) را بعد از # استخراج نمی‌کند!
+    # در نتیجه هیچ ایموجی یا کاراکتر فارسی خرابی وارد لینک نمی‌شود.
+    config_pattern = re.compile(r'vless://[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[^\s\'"<>#]+')
 
     all_extracted_configs = []
 
@@ -233,14 +201,15 @@ def scrape_all_channels():
         except Exception as e:
             print(f"❌ خطا: {e}")
 
-    # حذف کانفیگ‌های تکراری (بدون محدودیت تعداد)
+    # حذف تکراری‌ها
     unique_configs = list(dict.fromkeys(all_extracted_configs))
 
     if unique_configs:
         renamed_list = []
         for idx, config in enumerate(unique_configs, 1):
+            # اضافه کردن نام جدید و تمیز به انتهای لینک
             new_name = f"{CONFIG_PREFIX_NAME}{idx}"
-            renamed_list.append(rename_config(config, new_name))
+            renamed_list.append(f"{config}#{new_name}")
 
         plain_text_content = "\n".join(renamed_list)
         b64_encoded_content = base64.b64encode(plain_text_content.encode('utf-8')).decode('utf-8')
@@ -250,12 +219,12 @@ def scrape_all_channels():
             f.write(b64_encoded_content)
 
         print("\n" + "=" * 65)
-        print(f"✅ تعداد {len(renamed_list)} کانفیگ معتبر استخراج گردید.")
+        print(f"✅ تعداد {len(renamed_list)} کانفیگ تایید شده (بدون خطر کرش) استخراج شد.")
         print(f"✅ فایل سابسکریپشن ساخته شد: {sub_filename}")
         print("=" * 65)
 
     else:
-        print("\n❌ هیچ کانفیگ معتبری یافت نشد.")
+        print("\n❌ هیچ کانفیگ استانداردی یافت نشد. (همه دارای خطای ساختاری بودند)")
 
 
 if __name__ == "__main__":

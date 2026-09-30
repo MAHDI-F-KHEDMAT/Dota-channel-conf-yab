@@ -21,7 +21,7 @@ jobs:
         run: pip install requests beautifulsoup4
 
       - name: Run Python Scraper
-        run: python main.py
+        run: python Scraper.py
 
       # (اختیاری) اگر بخواهید تست سرعت با دقت ۱۰۰٪ توسط هسته Xray در لینوکس انجام شود، 
       # اینجا می‌توانید ابزار LiteSpeedTest (محبوب‌ترین تستر VLESS در گیتهاب) را دانلود و اجرا کنید

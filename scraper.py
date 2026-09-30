@@ -2,6 +2,7 @@ import re
 import time
 import html
 import base64
+import socket
 import requests
 import urllib.parse
 import concurrent.futures
@@ -30,7 +31,41 @@ class Colors:
     RESET = '\033[0m'
 
 # ==========================================
-# تابع تست سرعت و دانلود ۱ مگابایت
+# ۱. تابع تست اتصال TCP سریع (فیلتر اولیه سلامت هاست و پورت)
+# ==========================================
+def check_tcp_connection(config_url, timeout=3):
+    try:
+        parsed = urlparse(config_url)
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            return {'config': config_url, 'status': False}
+        
+        # تلاش برای برقراری ارتباط TCP با هاست و پورت کانفیگ
+        with socket.create_connection((host, port), timeout=timeout):
+            return {'config': config_url, 'status': True}
+    except Exception:
+        return {'config': config_url, 'status': False}
+
+def filter_tcp_alive_configs(unique_configs):
+    print(f"\n{Colors.YELLOW}⚡ شروع تست اتصال TCP سریع برای {len(unique_configs)} کانفیگ...{Colors.RESET}")
+    
+    alive_configs = []
+    
+    # تست موازی TCP با ۵۰ ترد همزمان (بسیار سریع)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        future_to_config = {executor.submit(check_tcp_connection, url): url for url in unique_configs}
+        
+        for future in concurrent.futures.as_completed(future_to_config):
+            result = future.result()
+            if result['status']:
+                alive_configs.append(result['config'])
+                
+    print(f"{Colors.GREEN}✅ تست TCP تمام شد. تعداد {len(alive_configs)} کانفیگ زنده و پاسخگو ماندند.{Colors.RESET}")
+    return alive_configs
+
+# ==========================================
+# ۲. تابع تست سرعت و دانلود ۱ مگابایت (برای مراحل بعدی)
 # ==========================================
 def test_download_speed(config_url, local_socks_port=1080):
     proxy_address = f"socks5h://127.0.0.1:{local_socks_port}"
@@ -51,13 +86,15 @@ def test_download_speed(config_url, local_socks_port=1080):
         
     return {'config': config_url, 'speed': 0, 'status': 'failed'}
 
-def filter_top_200_configs(unique_configs):
-    print(f"\n{Colors.YELLOW}🚀 شروع تست سرعت دانلود (۱ مگابایتی) برای {len(unique_configs)} کانفیگ...{Colors.RESET}")
+def filter_top_200_configs(tcp_alive_configs):
+    if not tcp_alive_configs:
+        return []
+        
+    print(f"\n{Colors.YELLOW}🚀 شروع تست سرعت دانلود (۱ مگابایتی) روی کانفیگ‌های زنده...{Colors.RESET}")
     
     valid_tested = []
-    
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        future_to_config = {executor.submit(test_download_speed, url): url for url in unique_configs}
+        future_to_config = {executor.submit(test_download_speed, url): url for url in tcp_alive_configs}
         
         for future in concurrent.futures.as_completed(future_to_config):
             result = future.result()
@@ -65,17 +102,17 @@ def filter_top_200_configs(unique_configs):
                 valid_tested.append(result)
 
     if not valid_tested:
-        print(f"{Colors.YELLOW}⚠️ هیچ کانفیگی در تست سرعت موفق نبود. بازگشت به حالت پیش‌فرض.{Colors.RESET}")
-        return unique_configs[:MAX_FINAL_CONFIGS]
+        print(f"{Colors.YELLOW}⚠️ هیچ کانفیگی در تست سرعت موفق نبود. استفاده از کانفیگ‌های تایید شده TCP.{Colors.RESET}")
+        return tcp_alive_configs[:MAX_FINAL_CONFIGS]
 
     valid_tested.sort(key=lambda x: x['speed'], reverse=True)
     top_200 = valid_tested[:MAX_FINAL_CONFIGS]
     
-    print(f"{Colors.GREEN}✅ تست سرعت تمام شد. {len(top_200)} کانفیگ پرسرعت جدا شدند.{Colors.RESET}")
+    print(f"{Colors.GREEN}✅ گلچین کردن {len(top_200)} کانفیگ پرسرعت انجام شد.{Colors.RESET}")
     return [item['config'] for item in top_200]
 
 # ==========================================
-# تابع فیلتر ضد کرش
+# ۳. تابع فیلتر ضد کرش ساختاری
 # ==========================================
 def is_bulletproof_vless(raw_url):
     try:
@@ -95,7 +132,7 @@ def is_bulletproof_vless(raw_url):
     except Exception: return False
 
 # ==========================================
-# تابع بررسی هر کانال
+# ۴. تابع بررسی هر کانال
 # ==========================================
 def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
     if "/s/" not in channel_url: channel_url = channel_url.replace("t.me/", "t.me/s/")
@@ -152,7 +189,7 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
     return channel_configs
 
 # ==========================================
-# مدیریت اصلی
+# ۵. مدیریت اصلی
 # ==========================================
 def scrape_all_channels():
     session = requests.Session()
@@ -170,21 +207,31 @@ def scrape_all_channels():
     unique_configs = list(dict.fromkeys(all_extracted_configs))
 
     if unique_configs:
-        best_200_configs = filter_top_200_configs(unique_configs)
+        # مرحله ۱: تست اتصال TCP سریع برای حذف کانفیگ‌های مرده
+        tcp_alive_configs = filter_tcp_alive_configs(unique_configs)
+        
+        if tcp_alive_configs:
+            # مرحله ۲: تست سرعت دانلود و گلچین کردن ۲۰۰ تای برتر
+            best_configs = filter_top_200_configs(tcp_alive_configs)
+        else:
+            best_configs = []
 
-        renamed_list = []
-        for idx, config in enumerate(best_200_configs, 1):
-            new_name = f"{CONFIG_PREFIX_NAME}{idx}"
-            renamed_list.append(f"{config}#{new_name}")
+        if best_configs:
+            renamed_list = []
+            for idx, config in enumerate(best_configs, 1):
+                new_name = f"{CONFIG_PREFIX_NAME}{idx}"
+                renamed_list.append(f"{config}#{new_name}")
 
-        plain_text_content = "\n".join(renamed_list)
-        b64_encoded_content = base64.b64encode(plain_text_content.encode('utf-8')).decode('utf-8')
+            plain_text_content = "\n".join(renamed_list)
+            b64_encoded_content = base64.b64encode(plain_text_content.encode('utf-8')).decode('utf-8')
 
-        sub_filename = 'sub_vless_base64.txt'
-        with open(sub_filename, 'w', encoding='utf-8') as f:
-            f.write(b64_encoded_content)
+            sub_filename = 'sub_vless_base64.txt'
+            with open(sub_filename, 'w', encoding='utf-8') as f:
+                f.write(b64_encoded_content)
 
-        print(f"\n{Colors.GREEN}✅ فایل نهایی سابسکریپشن با {len(best_200_configs)} کانفیگ ساخته شد!{Colors.RESET}")
+            print(f"\n{Colors.GREEN}✅ فایل نهایی سابسکریپشن با {len(best_configs)} کانفیگ سالم و پرسرعت ساخته شد!{Colors.RESET}")
+        else:
+            print(f"\n{Colors.YELLOW}❌ هیچ کانفیگی از تست TCP یا سرعت عبور نکرد.{Colors.RESET}")
     else:
         print(f"\n{Colors.YELLOW}❌ هیچ کانفیگ استانداردی یافت نشد.{Colors.RESET}")
 

@@ -18,7 +18,8 @@ urllib.parse.uses_netloc.append('vless')
 # ==========================================
 DAYS_BACK = 2
 CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"
-MAX_FINAL_CONFIGS = 200  # محدودیت فایل نهایی (۲۰۰ کانفیگ برتر)
+MAX_FINAL_CONFIGS = 500  # تعداد کانفیگ‌های برتر فایل نهایی
+DOWNLOAD_TEST_URL = "https://speed.cloudflare.com/__down?bytes=1048576"  # لینک ۱ مگابایتی کلودفلر
 
 CHANNELS = [
     "https://t.me/ConfigsHUB"
@@ -31,7 +32,7 @@ class Colors:
     RESET = '\033[0m'
 
 # ==========================================
-# ۱. تابع تست اتصال TCP سریع (فیلتر اولیه سلامت هاست و پورت)
+# ۱. تست اتصال TCP سریع (فیلتر اولیه کانفیگ‌های مرده)
 # ==========================================
 def check_tcp_connection(config_url, timeout=3):
     try:
@@ -40,8 +41,7 @@ def check_tcp_connection(config_url, timeout=3):
         port = parsed.port
         if not host or not port:
             return {'config': config_url, 'status': False}
-        
-        # تلاش برای برقراری ارتباط TCP با هاست و پورت کانفیگ
+
         with socket.create_connection((host, port), timeout=timeout):
             return {'config': config_url, 'status': True}
     except Exception:
@@ -49,23 +49,20 @@ def check_tcp_connection(config_url, timeout=3):
 
 def filter_tcp_alive_configs(unique_configs):
     print(f"\n{Colors.YELLOW}⚡ شروع تست اتصال TCP سریع برای {len(unique_configs)} کانفیگ...{Colors.RESET}")
-    
+
     alive_configs = []
-    
-    # تست موازی TCP با ۵۰ ترد همزمان (بسیار سریع)
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
         future_to_config = {executor.submit(check_tcp_connection, url): url for url in unique_configs}
-        
         for future in concurrent.futures.as_completed(future_to_config):
             result = future.result()
             if result['status']:
                 alive_configs.append(result['config'])
-                
+
     print(f"{Colors.GREEN}✅ تست TCP تمام شد. تعداد {len(alive_configs)} کانفیگ زنده و پاسخگو ماندند.{Colors.RESET}")
     return alive_configs
 
 # ==========================================
-# ۲. تابع تست سرعت و دانلود ۱ مگابایت (برای مراحل بعدی)
+# ۲. تست سرعت دانلود ۱ مگابایت واقعی بر روی تمام کانفیگ‌های زنده
 # ==========================================
 def test_download_speed(config_url, local_socks_port=1080):
     proxy_address = f"socks5h://127.0.0.1:{local_socks_port}"
@@ -73,46 +70,54 @@ def test_download_speed(config_url, local_socks_port=1080):
         "http": proxy_address,
         "https": proxy_address
     }
-    
+
     start_time = time.time()
     try:
-        response = requests.get("http://speedtest.tele2.net/1MB.zip", proxies=proxies, timeout=10)
-        if response.status_code == 200 and len(response.content) > 1000000:
-            duration = time.time() - start_time
-            speed_mbps = (1.0 / duration) * 8
-            return {'config': config_url, 'speed': speed_mbps, 'status': 'ok'}
+        response = requests.get(DOWNLOAD_TEST_URL, proxies=proxies, timeout=12, stream=True)
+        if response.status_code == 200:
+            downloaded_bytes = 0
+            for chunk in response.iter_content(chunk_size=16384):
+                if chunk:
+                    downloaded_bytes += len(chunk)
+
+            # بررسی اتمام کامل دانلود ۱ مگابایت (۱,۰۰۰,۰۰۰ بایت)
+            if downloaded_bytes >= 1000000:
+                duration = time.time() - start_time
+                speed_mbps = (downloaded_bytes * 8) / (1024 * 1024 * duration) if duration > 0 else 0
+                return {'config': config_url, 'speed': speed_mbps, 'status': 'ok'}
     except Exception:
         pass
-        
+
     return {'config': config_url, 'speed': 0, 'status': 'failed'}
 
-def filter_top_200_configs(tcp_alive_configs):
+def filter_top_500_configs(tcp_alive_configs):
     if not tcp_alive_configs:
         return []
-        
-    print(f"\n{Colors.YELLOW}🚀 شروع تست سرعت دانلود (۱ مگابایتی) روی کانفیگ‌های زنده...{Colors.RESET}")
-    
+
+    print(f"\n{Colors.YELLOW}🚀 شروع تست سرعت دانلود ۱ مگابایتی روی تمامی {len(tcp_alive_configs)} کانفیگ زنده...{Colors.RESET}")
+
     valid_tested = []
+    # اجرای تست سرعت دانلود موازی بر روی تمامی کانفیگ‌های زنده
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         future_to_config = {executor.submit(test_download_speed, url): url for url in tcp_alive_configs}
-        
         for future in concurrent.futures.as_completed(future_to_config):
             result = future.result()
             if result['status'] == 'ok':
                 valid_tested.append(result)
 
     if not valid_tested:
-        print(f"{Colors.YELLOW}⚠️ هیچ کانفیگی در تست سرعت موفق نبود. استفاده از کانفیگ‌های تایید شده TCP.{Colors.RESET}")
+        print(f"{Colors.YELLOW}⚠️ هیچ کانفیگی موفق به دانلود کامل فایل ۱ مگابایتی نشد. استفاده از {min(len(tcp_alive_configs), MAX_FINAL_CONFIGS)} کانفیگ تایید شده TCP.{Colors.RESET}")
         return tcp_alive_configs[:MAX_FINAL_CONFIGS]
 
+    # مرتب‌سازی بر اساس سرعت دانلود (از سریع‌ترین به کندترین)
     valid_tested.sort(key=lambda x: x['speed'], reverse=True)
-    top_200 = valid_tested[:MAX_FINAL_CONFIGS]
-    
-    print(f"{Colors.GREEN}✅ گلچین کردن {len(top_200)} کانفیگ پرسرعت انجام شد.{Colors.RESET}")
-    return [item['config'] for item in top_200]
+    top_500 = valid_tested[:MAX_FINAL_CONFIGS]
+
+    print(f"{Colors.GREEN}✅ گلچین کردن {len(top_500)} کانفیگ پرسرعت انجام شد.{Colors.RESET}")
+    return [item['config'] for item in top_500]
 
 # ==========================================
-# ۳. تابع فیلتر ضد کرش ساختاری
+# ۳. فیلتر ساختاری پروتکل VLESS
 # ==========================================
 def is_bulletproof_vless(raw_url):
     try:
@@ -132,7 +137,7 @@ def is_bulletproof_vless(raw_url):
     except Exception: return False
 
 # ==========================================
-# ۴. تابع بررسی هر کانال
+# ۴. استخراج کانفیگ‌ها از کانال‌ها
 # ==========================================
 def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
     if "/s/" not in channel_url: channel_url = channel_url.replace("t.me/", "t.me/s/")
@@ -166,7 +171,7 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
 
             time_tag = msg.find('time')
             if not time_tag: continue
-            
+
             try:
                 msg_dt = datetime.fromisoformat(time_tag.get('datetime').replace('Z', '+00:00').split('+')[0])
             except ValueError: continue
@@ -189,14 +194,14 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
     return channel_configs
 
 # ==========================================
-# ۵. مدیریت اصلی
+# ۵. اجرای اصلی اسکریپت
 # ==========================================
 def scrape_all_channels():
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"})
     cutoff_datetime = datetime.utcnow() - timedelta(days=DAYS_BACK)
     config_pattern = re.compile(r'vless://[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[^\s\'"<>#]+')
-    
+
     all_extracted_configs = []
     for channel in CHANNELS:
         try:
@@ -207,12 +212,10 @@ def scrape_all_channels():
     unique_configs = list(dict.fromkeys(all_extracted_configs))
 
     if unique_configs:
-        # مرحله ۱: تست اتصال TCP سریع برای حذف کانفیگ‌های مرده
         tcp_alive_configs = filter_tcp_alive_configs(unique_configs)
-        
+
         if tcp_alive_configs:
-            # مرحله ۲: تست سرعت دانلود و گلچین کردن ۲۰۰ تای برتر
-            best_configs = filter_top_200_configs(tcp_alive_configs)
+            best_configs = filter_top_500_configs(tcp_alive_configs)
         else:
             best_configs = []
 
@@ -229,9 +232,9 @@ def scrape_all_channels():
             with open(sub_filename, 'w', encoding='utf-8') as f:
                 f.write(b64_encoded_content)
 
-            print(f"\n{Colors.GREEN}✅ فایل نهایی سابسکریپشن با {len(best_configs)} کانفیگ سالم و پرسرعت ساخته شد!{Colors.RESET}")
+            print(f"\n{Colors.GREEN}✅ فایل نهایی سابسکریپشن با {len(best_configs)} کانفیگ پرسرعت ایجاد شد!{Colors.RESET}")
         else:
-            print(f"\n{Colors.YELLOW}❌ هیچ کانفیگی از تست TCP یا سرعت عبور نکرد.{Colors.RESET}")
+            print(f"\n{Colors.YELLOW}❌ هیچ کانفیگی از تست سرعت عبور نکرد.{Colors.RESET}")
     else:
         print(f"\n{Colors.YELLOW}❌ هیچ کانفیگ استانداردی یافت نشد.{Colors.RESET}")
 

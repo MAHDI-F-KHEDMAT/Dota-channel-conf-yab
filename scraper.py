@@ -6,10 +6,11 @@ import socket
 import requests
 import urllib.parse
 import concurrent.futures
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
+# فهماندن پروتکل vless به کتابخانه استاندارد پایتون
 urllib.parse.uses_netloc.append('vless')
 
 # ==========================================
@@ -17,8 +18,7 @@ urllib.parse.uses_netloc.append('vless')
 # ==========================================
 DAYS_BACK = 2
 CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"
-MAX_FINAL_CONFIGS = 200
-MAX_PER_HOST = 3
+MAX_FINAL_CONFIGS = 200  # محدودیت فایل نهایی (۲۰۰ کانفیگ برتر)
 
 CHANNELS = [
     "https://t.me/ConfigsHUB"
@@ -31,7 +31,7 @@ class Colors:
     RESET = '\033[0m'
 
 # ==========================================
-# ۱. تابع تست اتصال TCP
+# ۱. تابع تست اتصال TCP سریع (فیلتر اولیه سلامت هاست و پورت)
 # ==========================================
 def check_tcp_connection(config_url, timeout=3):
     try:
@@ -41,105 +41,98 @@ def check_tcp_connection(config_url, timeout=3):
         if not host or not port:
             return {'config': config_url, 'status': False}
         
+        # تلاش برای برقراری ارتباط TCP با هاست و پورت کانفیگ
         with socket.create_connection((host, port), timeout=timeout):
             return {'config': config_url, 'status': True}
     except Exception:
         return {'config': config_url, 'status': False}
 
 def filter_tcp_alive_configs(unique_configs):
-    print(f"\n{Colors.YELLOW}⚡ شروع تست اتصال TCP برای {len(unique_configs)} کانفیگ...{Colors.RESET}")
+    print(f"\n{Colors.YELLOW}⚡ شروع تست اتصال TCP سریع برای {len(unique_configs)} کانفیگ...{Colors.RESET}")
+    
     alive_configs = []
+    
+    # تست موازی TCP با ۵۰ ترد همزمان (بسیار سریع)
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
         future_to_config = {executor.submit(check_tcp_connection, url): url for url in unique_configs}
+        
         for future in concurrent.futures.as_completed(future_to_config):
-            res = future.result()
-            if res['status']:
-                alive_configs.append(res['config'])
-    print(f"{Colors.GREEN}✅ تعداد {len(alive_configs)} کانفیگ پاسخگو ماندند.{Colors.RESET}")
+            result = future.result()
+            if result['status']:
+                alive_configs.append(result['config'])
+                
+    print(f"{Colors.GREEN}✅ تست TCP تمام شد. تعداد {len(alive_configs)} کانفیگ زنده و پاسخگو ماندند.{Colors.RESET}")
     return alive_configs
 
 # ==========================================
-# ۲. تنوع‌بخشی به سرورها
+# ۲. تابع تست سرعت و دانلود ۱ مگابایت (برای مراحل بعدی)
 # ==========================================
-def limit_configs_per_host(configs, max_per_host=MAX_PER_HOST):
-    host_count = {}
-    filtered = []
-    for cfg in configs:
-        try:
-            host = urlparse(cfg).hostname
-            if host:
-                count = host_count.get(host, 0)
-                if count < max_per_host:
-                    host_count[host] = count + 1
-                    filtered.append(cfg)
-        except Exception:
-            continue
-    return filtered
-
-# ==========================================
-# ۳. پاک‌سازی و استانداردسازی کامل لینک (رفع عامل اصلی کرش)
-# ==========================================
-def sanitize_and_validate_vless(raw_url):
+def test_download_speed(config_url, local_socks_port=1080):
+    proxy_address = f"socks5h://127.0.0.1:{local_socks_port}"
+    proxies = {
+        "http": proxy_address,
+        "https": proxy_address
+    }
+    
+    start_time = time.time()
     try:
-        # ۱. رفع مشکل &amp; تلگرام و کاراکترهای نامرئی
-        raw_url = html.unescape(raw_url).replace('&amp;', '&').strip()
-        raw_url = re.sub(r'[\u200b\u200c\r\n]', '', raw_url)
+        response = requests.get("http://speedtest.tele2.net/1MB.zip", proxies=proxies, timeout=10)
+        if response.status_code == 200 and len(response.content) > 1000000:
+            duration = time.time() - start_time
+            speed_mbps = (1.0 / duration) * 8
+            return {'config': config_url, 'speed': speed_mbps, 'status': 'ok'}
+    except Exception:
+        pass
+        
+    return {'config': config_url, 'speed': 0, 'status': 'failed'}
 
+def filter_top_200_configs(tcp_alive_configs):
+    if not tcp_alive_configs:
+        return []
+        
+    print(f"\n{Colors.YELLOW}🚀 شروع تست سرعت دانلود (۱ مگابایتی) روی کانفیگ‌های زنده...{Colors.RESET}")
+    
+    valid_tested = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        future_to_config = {executor.submit(test_download_speed, url): url for url in tcp_alive_configs}
+        
+        for future in concurrent.futures.as_completed(future_to_config):
+            result = future.result()
+            if result['status'] == 'ok':
+                valid_tested.append(result)
+
+    if not valid_tested:
+        print(f"{Colors.YELLOW}⚠️ هیچ کانفیگی در تست سرعت موفق نبود. استفاده از کانفیگ‌های تایید شده TCP.{Colors.RESET}")
+        return tcp_alive_configs[:MAX_FINAL_CONFIGS]
+
+    valid_tested.sort(key=lambda x: x['speed'], reverse=True)
+    top_200 = valid_tested[:MAX_FINAL_CONFIGS]
+    
+    print(f"{Colors.GREEN}✅ گلچین کردن {len(top_200)} کانفیگ پرسرعت انجام شد.{Colors.RESET}")
+    return [item['config'] for item in top_200]
+
+# ==========================================
+# ۳. تابع فیلتر ضد کرش ساختاری
+# ==========================================
+def is_bulletproof_vless(raw_url):
+    try:
         parsed = urlparse(raw_url)
-        if parsed.scheme != 'vless': return None
-        if not parsed.hostname or not parsed.port: return None
-        if not (1 <= parsed.port <= 65535): return None
-
-        # ۲. بررسی صحت ساختار UUID
-        uuid = parsed.username
-        if not uuid or not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', uuid):
-            return None
-
+        if not parsed.hostname or not parsed.port: return False
+        if not (1 <= parsed.port <= 65535): return False
         qs = parse_qs(parsed.query)
         params = {k.lower(): v[0] for k, v in qs.items()}
-
-        # ۳. نگه داشتن فقط پارامترهای رسمی Xray (حذف پارامترهای سمی و غیراستاندارد)
-        VALID_KEYS = {'type', 'security', 'pbk', 'fp', 'sni', 'sid', 'spx', 'flow', 'path', 'host', 'headertype', 'encryption'}
-        clean_params = {}
-
-        for k, v in params.items():
-            if k in VALID_KEYS:
-                clean_params[k] = v
-
-        security = clean_params.get('security', 'none').lower()
-        net_type = clean_params.get('type', 'tcp').lower()
-        flow = clean_params.get('flow', '').lower()
-
-        if security not in ('none', 'tls', 'xtls', 'reality'): return None
-
+        net_type, security, flow = params.get('type', 'tcp').lower(), params.get('security', 'none').lower(), params.get('flow', '').lower()
+        if security not in ('none', 'tls', 'xtls', 'reality'): return False
         if security == 'reality':
-            pbk = clean_params.get('pbk', '')
-            if not pbk or not re.match(r'^[A-Za-z0-9\-_]{43}$', pbk): return None
-            if not clean_params.get('sni', ''): return None
-
-        if 'vision' in flow and (net_type != 'tcp' or security not in ('tls', 'xtls', 'reality')):
-            return None
-
-        # بازسازی کوئری استرینگ تمیز
-        clean_query = urlencode(clean_params)
-        
-        # بازسازی کامل لینک بدون کرش
-        clean_url = urlunparse((
-            'vless',
-            f"{parsed.hostname}:{parsed.port}",
-            f"/{uuid}",
-            '',
-            clean_query,
-            ''
-        ))
-
-        return clean_url
-
-    except Exception:
-        return None
+            if not params.get('pbk', '') or not re.match(r'^[A-Za-z0-9\-_]{43}$', params.get('pbk', '')): return False
+            if params.get('sid', '') and not re.match(r'^([0-9a-fA-F]{2}){1,8}$', params.get('sid', '')): return False
+            if not params.get('sni', ''): return False
+        if 'vision' in flow and (net_type != 'tcp' or security not in ('tls', 'xtls', 'reality')): return False
+        return True
+    except Exception: return False
 
 # ==========================================
-# ۴. استخراج از کانال
+# ۴. تابع بررسی هر کانال
 # ==========================================
 def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
     if "/s/" not in channel_url: channel_url = channel_url.replace("t.me/", "t.me/s/")
@@ -184,11 +177,10 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
 
             text_div = msg.find('div', class_='tgme_widget_message_text') or msg.find('div', class_='tgme_widget_message_caption')
             if text_div:
-                msg_text = text_div.get_text(separator=" ", strip=False)
+                msg_text = html.unescape(text_div.get_text(separator=" ", strip=False))
                 for raw_config in config_pattern.findall(msg_text):
-                    clean_cfg = sanitize_and_validate_vless(raw_config)
-                    if clean_cfg:
-                        channel_configs.append(clean_cfg)
+                    if is_bulletproof_vless(raw_config):
+                        channel_configs.append(raw_config)
 
         if reached_old or not page_min_id or page_min_id in seen_min_ids: break
         seen_min_ids.add(page_min_id)
@@ -203,7 +195,7 @@ def scrape_all_channels():
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"})
     cutoff_datetime = datetime.utcnow() - timedelta(days=DAYS_BACK)
-    config_pattern = re.compile(r'vless://[^\s\'"<>]+')
+    config_pattern = re.compile(r'vless://[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[^\s\'"<>#]+')
     
     all_extracted_configs = []
     for channel in CHANNELS:
@@ -215,14 +207,18 @@ def scrape_all_channels():
     unique_configs = list(dict.fromkeys(all_extracted_configs))
 
     if unique_configs:
+        # مرحله ۱: تست اتصال TCP سریع برای حذف کانفیگ‌های مرده
         tcp_alive_configs = filter_tcp_alive_configs(unique_configs)
-        diverse_configs = limit_configs_per_host(tcp_alive_configs)
-        final_configs = diverse_configs[:MAX_FINAL_CONFIGS]
+        
+        if tcp_alive_configs:
+            # مرحله ۲: تست سرعت دانلود و گلچین کردن ۲۰۰ تای برتر
+            best_configs = filter_top_200_configs(tcp_alive_configs)
+        else:
+            best_configs = []
 
-        if final_configs:
+        if best_configs:
             renamed_list = []
-            for idx, config in enumerate(final_configs, 1):
-                # نام‌گذاری ساده و بدون درصد-انکود
+            for idx, config in enumerate(best_configs, 1):
                 new_name = f"{CONFIG_PREFIX_NAME}{idx}"
                 renamed_list.append(f"{config}#{new_name}")
 
@@ -233,11 +229,11 @@ def scrape_all_channels():
             with open(sub_filename, 'w', encoding='utf-8') as f:
                 f.write(b64_encoded_content)
 
-            print(f"\n{Colors.GREEN}✅ فایل سابسکریپشن بدون کرش با {len(final_configs)} کانفیگ ساخته شد!{Colors.RESET}")
+            print(f"\n{Colors.GREEN}✅ فایل نهایی سابسکریپشن با {len(best_configs)} کانفیگ سالم و پرسرعت ساخته شد!{Colors.RESET}")
         else:
-            print(f"\n{Colors.YELLOW}❌ هیچ کانفیگ زنده و معتبری یافت نشد.{Colors.RESET}")
+            print(f"\n{Colors.YELLOW}❌ هیچ کانفیگی از تست TCP یا سرعت عبور نکرد.{Colors.RESET}")
     else:
-        print(f"\n{Colors.YELLOW}❌ هیچ کانفیگی پیدا نشد.{Colors.RESET}")
+        print(f"\n{Colors.YELLOW}❌ هیچ کانفیگ استانداردی یافت نشد.{Colors.RESET}")
 
 if __name__ == "__main__":
     scrape_all_channels()

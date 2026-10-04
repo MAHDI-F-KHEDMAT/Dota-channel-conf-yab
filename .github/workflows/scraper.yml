@@ -2,7 +2,7 @@ name: Update VLESS Configs
 
 on:
   schedule:
-    - cron: '0 */1 * * *' # اجرای خودکار هر ۱۲ ساعت یک‌بار
+    - cron: '*/30 * * * *' # اجرای خودکار هر ۱۲ ساعت یک‌بار
   workflow_dispatch: # امکان اجرا و تست دستی از تب Actions گیت‌هاب
 
 jobs:

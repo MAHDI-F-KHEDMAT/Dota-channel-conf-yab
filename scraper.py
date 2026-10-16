@@ -18,7 +18,7 @@ urllib.parse.uses_netloc.append('vless')
 # ==========================================
 DAYS_BACK = 2
 CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"
-MAX_FINAL_CONFIGS = 200  # محدودیت فایل نهایی (۲۰۰ کانفیگ برتر)
+MAX_FINAL_CONFIGS = 500  # محدودیت فایل نهایی (۲۰۰ کانفیگ برتر)
 
 CHANNELS = [
     "https://t.me/ConfigsHUB"
